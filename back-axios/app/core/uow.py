@@ -1,0 +1,72 @@
+"""
+Unit of Work — gestión de transacción.
+
+Abre la sesión de BD, provee acceso a todos los repositorios,
+hace commit() automático al salir sin excepciones o rollback() si ocurre error.
+
+Capa: UoW
+Conoce a: Repository, Session
+NO conoce a: Service, Router
+
+Uso en Service:
+    with uow:
+        user = uow.usuarios.get_by_username("admin")
+        uow.categorias.add(nueva_categoria)
+    # commit automático al salir del with, rollback si hay excepción
+"""
+
+from sqlmodel import Session
+
+from app.core.database import engine
+from app.modules.usuarios.repository import UsuarioRepository
+from app.modules.categorias.repository import CategoriaRepository
+from app.modules.ingredientes.repository import IngredienteRepository
+from app.modules.productos.repository import ProductoRepository
+
+
+class UnitOfWork:
+    """
+    Context manager que encapsula una transacción de BD.
+
+    Atributos:
+        usuarios:    UsuarioRepository
+        categorias:  CategoriaRepository
+    """
+
+    def __init__(self):
+        self.session: Session | None = None
+
+    def __enter__(self):
+        # expire_on_commit=False evita que SQLAlchemy invalide los atributos
+        # de las instancias al hacer commit. De lo contrario, cuando FastAPI
+        # serializa la respuesta (después de salir del `with uow:` → commit +
+        # close), las instancias quedan detached y cualquier acceso a sus
+        # atributos lanza DetachedInstanceError porque intenta refrescarlas
+        # contra una sesión ya cerrada.
+        self.session = Session(engine, expire_on_commit=False)
+        self.usuarios = UsuarioRepository(self.session)
+        self.categorias = CategoriaRepository(self.session)
+        self.ingredientes = IngredienteRepository(self.session)
+        self.productos = ProductoRepository(self.session)
+        
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.session.rollback()
+        else:
+            self.session.commit()
+        self.session.close()
+
+    def commit(self):
+        """Commit explícito (para casos donde se necesita antes de salir del with)."""
+        self.session.commit()
+
+    def rollback(self):
+        """Rollback explícito."""
+        self.session.rollback()
+
+
+def get_uow() -> UnitOfWork:
+    """Dependencia FastAPI: provee un UnitOfWork por request."""
+    return UnitOfWork()
